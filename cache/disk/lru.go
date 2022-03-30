@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -18,6 +19,8 @@ type Key interface{}
 
 // EvictCallback is the type of callbacks that are invoked when items are evicted.
 type EvictCallback func(key Key, value lruItem)
+
+type ElementAtimeFunc func(key Key, value lruItem) (time.Time, error)
 
 // SizedLRU is an LRU cache that will keep its total size below maxSize by evicting
 // items.
@@ -44,6 +47,9 @@ type SizedLRU struct {
 
 	onEvict EvictCallback
 
+	getElementAtime ElementAtimeFunc
+
+	gaugeCacheAge           prometheus.GaugeFunc
 	gaugeCacheSizeBytes     prometheus.Gauge
 	gaugeCacheLogicalBytes  prometheus.Gauge
 	counterEvictedBytes     prometheus.Counter
@@ -60,13 +66,19 @@ type entry struct {
 const BlockSize = 4096
 
 // NewSizedLRU returns a new SizedLRU cache
-func NewSizedLRU(maxSize int64, onEvict EvictCallback) SizedLRU {
-	return SizedLRU{
-		maxSize: maxSize,
-		ll:      list.New(),
-		cache:   make(map[interface{}]*list.Element),
-		onEvict: onEvict,
+func NewSizedLRU(maxSize int64, onEvict EvictCallback, getElementAtime ElementAtimeFunc) SizedLRU {
+	var c SizedLRU
+	c = SizedLRU{
+		maxSize:         maxSize,
+		ll:              list.New(),
+		cache:           make(map[interface{}]*list.Element),
+		onEvict:         onEvict,
+		getElementAtime: getElementAtime,
 
+		gaugeCacheAge: prometheus.NewGaugeFunc(prometheus.GaugeOpts{
+			Name: "bazel_remote_disk_cache_age_seconds",
+			Help: "The file `atime` of oldest item in the LRU cache. Depending on filemount opts (e.g. relatime), the resolution may be meausured in 'days' and not accurate to the second",
+		}, func() float64 { return c.getCacheAge() }),
 		gaugeCacheSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "bazel_remote_disk_cache_size_bytes",
 			Help: "The current number of bytes in the disk backend",
@@ -84,9 +96,11 @@ func NewSizedLRU(maxSize int64, onEvict EvictCallback) SizedLRU {
 			Help: "The total number of bytes removed from disk backend, due to put of already existing key",
 		}),
 	}
+	return c
 }
 
 func (c *SizedLRU) RegisterMetrics() {
+	prometheus.MustRegister(c.gaugeCacheAge)
 	prometheus.MustRegister(c.gaugeCacheSizeBytes)
 	prometheus.MustRegister(c.gaugeCacheLogicalBytes)
 	prometheus.MustRegister(c.counterEvictedBytes)
@@ -279,4 +293,18 @@ func (c *SizedLRU) removeElement(e *list.Element) {
 // Round n up to the nearest multiple of BlockSize (4096).
 func roundUp4k(n int64) int64 {
 	return (n + BlockSize - 1) & -BlockSize
+}
+
+// Get `now() - atime` of the back item in the LRU cache
+func (c *SizedLRU) getCacheAge() float64 {
+	e := c.ll.Back()
+	if e != nil {
+		kv := e.Value.(*entry)
+		ts, err := c.getElementAtime(kv.key, kv.value)
+		if err != nil {
+			return time.Now().Sub(ts).Seconds()
+		}
+	}
+
+	return 0.0
 }

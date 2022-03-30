@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/buchgr/bazel-remote/cache"
 	"github.com/buchgr/bazel-remote/cache/disk/casblob"
@@ -143,24 +144,17 @@ func New(dir string, maxSizeBytes int64, opts ...Option) (Cache, error) {
 	// This function is only called while the lock is held
 	// by the current goroutine.
 	onEvict := func(key Key, value lruItem) {
-		ks := key.(string)
-		hash := ks[len(ks)-sha256.Size*2:]
-		var kind cache.EntryKind = cache.AC
-		if strings.HasPrefix(ks, "cas") {
-			kind = cache.CAS
-		} else if strings.HasPrefix(ks, "ac") {
-			kind = cache.AC
-		} else if strings.HasPrefix(ks, "raw") {
-			kind = cache.RAW
-		}
-
-		f := filepath.Join(dir, c.FileLocation(kind, value.legacy, hash, value.size, value.random))
-
+		f := c.getElementPath(key, value)
 		// Run in a goroutine so we can release the lock sooner.
 		go c.removeFile(f)
 	}
 
-	c.lru = NewSizedLRU(maxSizeBytes, onEvict)
+	getElementAtime := func(key Key, value lruItem) (time.Time, error) {
+		f := c.getElementPath(key, value)
+		return atime.Stat(f)
+	}
+
+	c.lru = NewSizedLRU(maxSizeBytes, onEvict, getElementAtime)
 
 	// Apply options.
 	for _, o := range opts {
@@ -211,6 +205,21 @@ func New(dir string, maxSizeBytes int64, opts ...Option) (Cache, error) {
 // Non-test users must call this to expose metrics.
 func (c *diskCache) RegisterMetrics() {
 	c.lru.RegisterMetrics()
+}
+
+func (c *diskCache) getElementPath(key Key, value lruItem) string {
+	ks := key.(string)
+	hash := ks[len(ks)-sha256.Size*2:]
+	var kind cache.EntryKind = cache.AC
+	if strings.HasPrefix(ks, "cas") {
+		kind = cache.CAS
+	} else if strings.HasPrefix(ks, "ac") {
+		kind = cache.AC
+	} else if strings.HasPrefix(ks, "raw") {
+		kind = cache.RAW
+	}
+
+	return filepath.Join(c.dir, c.FileLocation(kind, value.legacy, hash, value.size, value.random))
 }
 
 func (c *diskCache) removeFile(f string) {

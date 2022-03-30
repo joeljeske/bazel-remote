@@ -20,6 +20,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/buchgr/bazel-remote/cache"
 	"github.com/buchgr/bazel-remote/cache/disk/casblob"
@@ -142,7 +143,7 @@ func New(dir string, maxSizeBytes int64, opts ...Option) (Cache, error) {
 	// The eviction callback deletes the file from disk.
 	// This function is only called while the lock is held
 	// by the current goroutine.
-	onEvict := func(key Key, value lruItem) {
+	onEvict := func(key Key, value lruItem) time.Time {
 		ks := key.(string)
 		hash := ks[len(ks)-sha256.Size*2:]
 		var kind cache.EntryKind = cache.AC
@@ -156,8 +157,15 @@ func New(dir string, maxSizeBytes int64, opts ...Option) (Cache, error) {
 
 		f := filepath.Join(dir, c.FileLocation(kind, value.legacy, hash, value.size, value.random))
 
+		ts, err := atime.Stat(f)
+		if err != nil {
+			ts = time.Time{}
+		}
+
 		// Run in a goroutine so we can release the lock sooner.
 		go c.removeFile(f)
+
+		return ts
 	}
 
 	c.lru = NewSizedLRU(maxSizeBytes, onEvict)

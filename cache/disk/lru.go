@@ -4,6 +4,7 @@ import (
 	"container/list"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 )
@@ -17,7 +18,7 @@ import (
 type Key interface{}
 
 // EvictCallback is the type of callbacks that are invoked when items are evicted.
-type EvictCallback func(key Key, value lruItem)
+type EvictCallback func(key Key, value lruItem) time.Time
 
 // SizedLRU is an LRU cache that will keep its total size below maxSize by evicting
 // items.
@@ -44,10 +45,11 @@ type SizedLRU struct {
 
 	onEvict EvictCallback
 
-	gaugeCacheSizeBytes     prometheus.Gauge
-	gaugeCacheLogicalBytes  prometheus.Gauge
-	counterEvictedBytes     prometheus.Counter
-	counterOverwrittenBytes prometheus.Counter
+	gaugeCacheLastEvictAtime prometheus.Gauge
+	gaugeCacheSizeBytes      prometheus.Gauge
+	gaugeCacheLogicalBytes   prometheus.Gauge
+	counterEvictedBytes      prometheus.Counter
+	counterOverwrittenBytes  prometheus.Counter
 }
 
 type entry struct {
@@ -67,6 +69,10 @@ func NewSizedLRU(maxSize int64, onEvict EvictCallback) SizedLRU {
 		cache:   make(map[interface{}]*list.Element),
 		onEvict: onEvict,
 
+		gaugeCacheLastEvictAtime: prometheus.NewGauge(prometheus.GaugeOpts{
+			Name: "bazel_remote_disk_cache_last_evicted_atime",
+			Help: "The access time of the most recently evicted item from the LRU cache.",
+		}),
 		gaugeCacheSizeBytes: prometheus.NewGauge(prometheus.GaugeOpts{
 			Name: "bazel_remote_disk_cache_size_bytes",
 			Help: "The current number of bytes in the disk backend",
@@ -87,6 +93,7 @@ func NewSizedLRU(maxSize int64, onEvict EvictCallback) SizedLRU {
 }
 
 func (c *SizedLRU) RegisterMetrics() {
+	prometheus.MustRegister(c.gaugeCacheLastEvictAtime)
 	prometheus.MustRegister(c.gaugeCacheSizeBytes)
 	prometheus.MustRegister(c.gaugeCacheLogicalBytes)
 	prometheus.MustRegister(c.counterEvictedBytes)
@@ -272,7 +279,11 @@ func (c *SizedLRU) removeElement(e *list.Element) {
 	c.counterEvictedBytes.Add(float64(kv.value.sizeOnDisk))
 
 	if c.onEvict != nil {
-		c.onEvict(kv.key, kv.value)
+		ts := c.onEvict(kv.key, kv.value)
+
+		if !ts.IsZero() {
+			c.gaugeCacheLastEvictAtime.Set(float64(ts.Unix()))
+		}
 	}
 }
 

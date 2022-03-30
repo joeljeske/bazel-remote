@@ -4,6 +4,7 @@ import (
 	"math"
 	"reflect"
 	"testing"
+	"time"
 )
 
 func checkSizeAndNumItems(t *testing.T, lru SizedLRU, expSize int64, expNum int) {
@@ -60,8 +61,9 @@ func TestBasics(t *testing.T) {
 func TestEviction(t *testing.T) {
 	// Keep track of evictions using the callback
 	var evictions []int
-	onEvict := func(key Key, value lruItem) {
+	onEvict := func(key Key, value lruItem) time.Time {
 		evictions = append(evictions, key.(int))
+		return time.Time{}
 	}
 
 	lru := NewSizedLRU(10*BlockSize, onEvict)
